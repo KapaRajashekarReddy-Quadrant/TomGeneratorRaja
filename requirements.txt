@@ -1,0 +1,15 @@
+fastapi==0.110.0
+uvicorn==0.24.0
+
+pydantic==2.6.1
+python-dotenv==1.0.1
+
+requests==2.31.0
+
+msal==1.27.0
+
+azure-storage-blob==12.19.0
+
+# Added for Excel Mapping
+pandas==2.2.2
+openpyxl==3.1.2
