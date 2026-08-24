@@ -1,0 +1,8 @@
+openai>=1.0.0
+tableauhyperapi>=0.0.19000
+python-dotenv>=1.0.0
+fastapi
+uvicorn
+gunicorn
+azure-storage-blob
+
