@@ -212,10 +212,16 @@ def sanitize_format_string(format_str: Optional[str], data_type: str, measure_na
     return cleaned
 
 
+# def clean_dax_expression(expression: str) -> str:
+#     """Removes redundant DIVIDE wrappers and normalizes DAX measure calls."""
+#     if not expression:
+#         return ""
+#     return re.sub(r"DIVIDE\((\[[^\]]+\]),\s*1(?:\s*,\s*0)?\)", r"\1", expression).strip()
 def clean_dax_expression(expression: str) -> str:
     """Removes redundant DIVIDE wrappers and normalizes DAX measure calls."""
     if not expression:
         return ""
+    expression = re.sub(r"\bAVG\(([^()]+)\)", r"AVERAGE(\1)", expression, flags=re.I)
     return re.sub(r"DIVIDE\((\[[^\]]+\]),\s*1(?:\s*,\s*0)?\)", r"\1", expression).strip()
 
 
