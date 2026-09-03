@@ -97,6 +97,58 @@ class SemanticModelSchema(BaseModel):
     tables: List[TableSchema]
     relationships: List[RelationshipSchema]
 
+class KpiSuggestion(BaseModel):
+    """Duplicate-KPI recommendations from pre-migration analysis."""
+    remap: dict[str, str] = Field(
+        default_factory=dict,
+        description="removed KPI name -> keep KPI name",
+    )
+    remove: list[str] = Field(
+        default_factory=list,
+        description="KPI names that must not become measures",
+    )
+
+def apply_kpi_suggestions_to_measures(
+    measures: list[dict],
+    suggestions: "KpiSuggestion | None",
+) -> list[dict]:
+    """Drop recommended_remove measures; rewrite DAX refs to recommended_keep."""
+    if not suggestions:
+        return measures
+
+    remove_l = {n.strip().lower() for n in (suggestions.remove or []) if n and n.strip()}
+    remap_l = {
+        k.strip().lower(): v.strip()
+        for k, v in (suggestions.remap or {}).items()
+        if k and v and k.strip() and v.strip()
+    }
+    remove_l |= set(remap_l.keys())
+
+    kept = []
+    for m in measures:
+        name = (m.get("name") or "").strip()
+        if not name or name.lower() in remove_l:
+            continue
+        kept.append(dict(m))
+
+    def rewrite_expr(expr: str) -> str:
+        if not expr:
+            return expr
+        out = expr
+        for old, new in sorted(remap_l.items(), key=lambda kv: -len(kv[0])):
+            out = re.sub(
+                rf"\[{re.escape(old)}\]",
+                f"[{new}]",
+                out,
+                flags=re.IGNORECASE,
+            )
+        return out
+
+    for m in kept:
+        if isinstance(m.get("expression"), str):
+            m["expression"] = rewrite_expr(m["expression"])
+    return kept
+
 
 # ============================================================
 # AZURE BLOB DOWNLOAD
@@ -666,7 +718,8 @@ STRICT RULES
 
         return clean_dax_expression(baseline)
 
-    def execute(self, folder_name: str) -> dict:
+    # def execute(self, folder_name: str) -> dict:
+    def execute(self, folder_name: str, suggestions: KpiSuggestion | None = None) -> dict:
         twbx_path = download_twbx_from_container(folder_name)
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -746,6 +799,9 @@ STRICT RULES
                     "defaultFormat": format_str,
                 })
 
+            # Apply pre-migration duplicate-KPI suggestions (keep/remove)
+            measures = apply_kpi_suggestions_to_measures(measures, suggestions)
+
             raw_model_schema = {
                 "model_name": folder_name,
                 "tables": [],
@@ -795,11 +851,43 @@ STRICT RULES
 # API ENDPOINT
 # ============================================================
 
+# @app.post("/parse/{folder_name}")
+# def parse_twbx(folder_name: str):
+#     try:
+#         parser = TWBXMetadataParser()
+#         result = parser.execute(folder_name)
+#         return result
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/parse/{folder_name}")
-def parse_twbx(folder_name: str):
+def parse_twbx(
+    folder_name: str,
+    suggestions: KpiSuggestion | None = None,
+):
+    """
+    Parse TWBX → modelSchema.
+    Optional JSON body for migrate-with-suggestions:
+      { "remap": {"Performance": "Production Efficiency"}, "remove": ["Performance"] }
+    Omit body (or send null) for migrate-without-suggestions.
+    """
     try:
         parser = TWBXMetadataParser()
-        result = parser.execute(folder_name)
+        result = parser.execute(folder_name, suggestions=suggestions)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/test/apply-suggestions")
+def test_apply_suggestions(
+    measures: list[dict],
+    suggestions: KpiSuggestion | None = None,
+):
+    """Unit-test helper: apply suggestions to a measures list only."""
+    result = apply_kpi_suggestions_to_measures(measures, suggestions)
+    return {
+        "input_count": len(measures),
+        "output_count": len(result),
+        "measure_names": [m.get("name") for m in result],
+        "measures": result,
+    }
