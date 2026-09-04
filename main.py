@@ -887,12 +887,7 @@
 #     result = apply_kpi_suggestions_to_measures(measures, suggestions)
 #     return {
 #         "input_count": len(measures),
-#         "output_count": len(result),
-#         "measure_names": [m.get("name") for m in result],
-#         "measures": result,
-#     }
-
-import os
+#         "output_count": len(result),import os
 import re
 import json
 import zipfile
@@ -1381,7 +1376,14 @@ class TWBXMetadataParser:
 
         return calculations
 
-    def resolve_dependencies(self, calculation, calculations, schema_columns):
+    def resolve_dependencies(self, calculation, calculations, schema_columns, extra_text: str | None = None):
+        """
+        Resolve bracket references to physical columns / other calculated fields.
+        By default only scans the Tableau formula. Pass extra_text (e.g. a DAX
+        expression) to ALSO scan that string and union its refs in - needed for
+        validation, where the DAX side may reference measures the Tableau side
+        doesn't (or vice versa), and both need to be resolved/substituted.
+        """
         formula = calculation["formula"]
         calc_names = {}
 
@@ -1395,6 +1397,8 @@ class TWBXMetadataParser:
                 physical_lookup[col.lower()] = table
 
         refs = re.findall(r"\[([^\]]+)\]", formula)
+        if extra_text:
+            refs += re.findall(r"\[([^\]]+)\]", extra_text)
         dependencies = []
         seen = set()
 
@@ -1777,23 +1781,35 @@ STRICT RULES
             self._tables = tables
             return calculations, tables, column_types
 
-    def _categorize_dependencies(self, calculation):
-        """Split a calc's deps into physical columns / other-calc names / unresolved."""
-        deps = self.resolve_dependencies(calculation, self._all_calculations, self._tables)
+    def _categorize_dependencies(self, calculation, dax_expression: str | None = None):
+        """
+        Split a calc's deps into physical columns / other-calc names / unresolved.
+        Scans the Tableau formula AND (if provided) the DAX expression, unioned -
+        a reference that only appears on the DAX side (e.g. a measure the
+        conversion introduced that the Tableau formula never named) still needs
+        to be recognized as a dependency, or it gets silently guessed by the LLM
+        instead of resolved to a real value.
+        """
+        deps = self.resolve_dependencies(
+            calculation, self._all_calculations, self._tables, extra_text=dax_expression
+        )
         physical = [d for d in deps if d["type"] == "physical_column"]
         calc_deps = [d["name"] for d in deps if d["type"] == "calculated_measure"]
         unresolved = [d["name"] for d in deps if d["type"] == "unresolved"]
         return physical, calc_deps, unresolved
 
-    def build_validation_plan(self, measure_names: list[str]):
+    def build_validation_plan(self, measure_names: list[str], dax_by_name: dict[str, str] | None = None):
         """
-        BFS out from the requested measures through calculated-field dependencies.
+        BFS out from the requested measures through calculated-field dependencies,
+        following refs found in EITHER the Tableau formula or the matching DAX
+        expression (when dax_by_name has it) - see _categorize_dependencies.
         Returns:
           closure: {name: calculation dict}  (includes pulled-in internal dependencies)
           edges:   {name: [dep names]}       (only calc->calc edges)
           physical_needed: {table: set(columns)}
           unresolved: {name: [bad refs]}
         """
+        dax_by_name = dax_by_name or {}
         calc_by_name = {c["name"]: c for c in self._all_calculations}
         closure = {}
         edges = {}
@@ -1811,7 +1827,7 @@ STRICT RULES
                 continue
 
             closure[name] = calculation
-            physical, calc_deps, bad = self._categorize_dependencies(calculation)
+            physical, calc_deps, bad = self._categorize_dependencies(calculation, dax_by_name.get(name))
 
             edges[name] = calc_deps
             if bad:
@@ -1934,7 +1950,7 @@ Return ONLY JSON of this exact shape:
         requested_names = [m["name"] for m in measures]
         dax_by_name = {m["name"]: m["expression"] for m in measures}
 
-        closure, edges, physical_needed, unresolved = self.build_validation_plan(requested_names)
+        closure, edges, physical_needed, unresolved = self.build_validation_plan(requested_names, dax_by_name)
 
         try:
             order = self.topo_order(edges)
@@ -1949,7 +1965,7 @@ Return ONLY JSON of this exact shape:
         for name in order:
             calculation = closure[name]
             is_requested = name in dax_by_name
-            physical, calc_deps, bad_refs = self._categorize_dependencies(calculation)
+            physical, calc_deps, bad_refs = self._categorize_dependencies(calculation, dax_by_name.get(name))
 
             if bad_refs:
                 results.append({
@@ -2092,3 +2108,7 @@ def test_apply_suggestions(
         "measure_names": [m.get("name") for m in result],
         "measures": result,
     }
+#         "measure_names": [m.get("name") for m in result],
+#         "measures": result,
+#     }
+
